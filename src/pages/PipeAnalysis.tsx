@@ -1,414 +1,239 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  Search, 
-  Filter, 
-  AlertTriangle, 
-  CheckCircle, 
-  XCircle,
-  TrendingDown,
-  TrendingUp,
-  Activity,
-  Bell,
-  X,
-  RefreshCw
-} from 'lucide-react';
-import { PipeAnalysis as PipeAnalysisType, PipeAlert } from '../types';
+// 📁 File: src/pages/PipeAnalysis.tsx
+import { db, pipeBucket } from "../firebase";
+import React, { useEffect, useState } from "react";
+import {
+  ref as storageRef,
+  listAll,
+  getDownloadURL,
+} from "firebase/storage";
+import {
+  collection,
+  getDocs,
+  deleteDoc,
+  doc,
+  setDoc,
+} from "firebase/firestore";
+import * as XLSX from "xlsx";
+import { normalizeStatus, getStatus } from "../utils/pipeUtils";
+import { PipeSummary } from "../types/pipe";
+import Papa from "papaparse";
 
 const PipeAnalysis: React.FC = () => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [pipeFilter, setPipeFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [alerts, setAlerts] = useState<PipeAlert[]>([]);
-  const [showAlert, setShowAlert] = useState(false);
+  const [fileDates, setFileDates] = useState<string[]>([]);
+  const [selectedDates, setSelectedDates] = useState<string>("");
+  const [summary, setSummary] = useState<PipeSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc" | "default">("default");
+  const [statusFilter, setStatusFilter] = useState<string>("All");
+  const [clientFilter, setClientFilter] = useState<string>("All");
+  const [pgModeFilter, setPgModeFilter] = useState<string>("All");
+  const [searchCode, setSearchCode] = useState<string>("");
 
-  const pipeAnalysisData: PipeAnalysisType[] = [
-    {
-      id: 'PA001',
-      merchantId: '1',
-      merchantName: 'TechCorp Solutions',
-      pipeName: 'BOB',
-      paymentMode: 'UPI_COLLECT',
-      totalTransactions: 100,
-      successTransactions: 30,
-      failedTransactions: 70,
-      successRate: 30,
-      lastUpdated: '2024-03-15T10:30:00Z',
-      status: 'critical',
-      recommendedAction: 'Switch to YES_BANK pipe'
-    },
-    {
-      id: 'PA002',
-      merchantId: '2',
-      merchantName: 'Fashion Hub',
-      pipeName: 'AIRTEL',
-      paymentMode: 'UPI_INTENT',
-      totalTransactions: 250,
-      successTransactions: 225,
-      failedTransactions: 25,
-      successRate: 90,
-      lastUpdated: '2024-03-15T09:45:00Z',
-      status: 'healthy'
-    },
-    {
-      id: 'PA003',
-      merchantId: '3',
-      merchantName: 'Food Express',
-      pipeName: 'YES_BANK',
-      paymentMode: 'NETBANKING',
-      totalTransactions: 180,
-      successTransactions: 135,
-      failedTransactions: 45,
-      successRate: 75,
-      lastUpdated: '2024-03-15T09:15:00Z',
-      status: 'warning',
-      recommendedAction: 'Monitor closely'
-    },
-    {
-      id: 'PA004',
-      merchantId: '4',
-      merchantName: 'Digital Services',
-      pipeName: 'INDIAN_BANK',
-      paymentMode: 'CARD',
-      totalTransactions: 320,
-      successTransactions: 304,
-      failedTransactions: 16,
-      successRate: 95,
-      lastUpdated: '2024-03-15T08:30:00Z',
-      status: 'healthy'
-    },
-    {
-      id: 'PA005',
-      merchantId: '5',
-      merchantName: 'Retail Store',
-      pipeName: 'BOB',
-      paymentMode: 'WALLET',
-      totalTransactions: 150,
-      successTransactions: 90,
-      failedTransactions: 60,
-      successRate: 60,
-      lastUpdated: '2024-03-15T07:20:00Z',
-      status: 'warning',
-      recommendedAction: 'Consider pipe optimization'
+  const fetchAvailableFiles = async () => {
+    try {
+      const prefix = "pipe_data/";
+      const result = await listAll(storageRef(pipeBucket, prefix));
+      const csvs = result.items
+        .filter((item) => item.name.endsWith(".csv"))
+        .map((item) => item.name.replace(".csv", ""));
+      setFileDates(csvs.sort());
+      setSelectedDates(csvs.length ? csvs[csvs.length - 1] : "");
+    } catch (err) {
+      console.error("❌ Error fetching file list:", err);
     }
-  ];
+  };
 
-  // Generate alerts for critical pipes
+  const loadCSVs = React.useCallback(async () => {
+    if (!selectedDates || loading) return;
+    setLoading(true);
+    try {
+      const allData: any[] = [];
+      const filePath = `pipe_data/${selectedDates}.csv`;
+      const fileRef = storageRef(pipeBucket, filePath);
+      const url = await getDownloadURL(fileRef);
+      const response = await fetch(url);
+      const csvText = await response.text();
+      const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+      for (const row of parsed.data as any[]) {
+        allData.push({ ...row, __source_date: selectedDates });
+      }
+
+      const cleaned = allData.filter(
+        (row) => row && ["success", "failed"].includes(normalizeStatus(row.status))
+      );
+
+      const grouped = new Map<string, any>();
+      cleaned.forEach((row) => {
+        const key = `${row.client_name}_${row.client_code}_${row.pg_pay_mode}_${row.payment_mode}`;
+        const normalized = normalizeStatus(row.status);
+        if (!grouped.has(key)) {
+          grouped.set(key, {
+            client_name: row.client_name || "Unknown",
+            client_code: row.client_code,
+            pg_pay_mode: row.pg_pay_mode,
+            payment_mode: row.payment_mode,
+            success: 0,
+            failed: 0,
+          });
+        }
+        if (normalized === "success") grouped.get(key).success++;
+        if (normalized === "failed") grouped.get(key).failed++;
+      });
+
+      const summaryArray: PipeSummary[] = Array.from(grouped.values()).map((row) => {
+        const total = row.success + row.failed;
+        const successPercent = total ? (row.success / total) * 100 : 0;
+        return {
+          ...row,
+          TotalTxn: total,
+          SuccessPercent: +successPercent.toFixed(2),
+          Status: getStatus(successPercent),
+        };
+      });
+
+      if (sortOrder === "asc") summaryArray.sort((a, b) => a.SuccessPercent - b.SuccessPercent);
+      if (sortOrder === "desc") summaryArray.sort((a, b) => b.SuccessPercent - a.SuccessPercent);
+
+      setSummary(summaryArray);
+    } catch (err) {
+      console.error("❌ Error loading CSVs:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedDates, sortOrder, loading]);
+
+  const handleUpload = async () => {
+    const colRef = collection(db, "pipe_summary");
+    const docs = await getDocs(colRef);
+    for (const d of docs.docs) await deleteDoc(d.ref);
+    for (const row of summary) {
+      const id = `${row.client_code}_${row.pg_pay_mode}_${row.payment_mode}`;
+      await setDoc(doc(db, "pipe_summary", id), row);
+    }
+    alert("✅ Uploaded to Firestore");
+  };
+
+  const downloadCSV = () => {
+    const ws = XLSX.utils.json_to_sheet(summary);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Summary");
+    XLSX.writeFile(wb, `PIPE_Analysis_${selectedDates}.xlsx`);
+  };
+
   useEffect(() => {
-    const criticalPipes = pipeAnalysisData.filter(pipe => pipe.status === 'critical' || pipe.successRate < 50);
-    const newAlerts: PipeAlert[] = criticalPipes.map(pipe => ({
-      id: `ALERT_${pipe.id}`,
-      merchantId: pipe.merchantId,
-      merchantName: pipe.merchantName,
-      pipeName: pipe.pipeName,
-      paymentMode: pipe.paymentMode,
-      successRate: pipe.successRate,
-      totalTransactions: pipe.totalTransactions,
-      recommendedPipe: pipe.pipeName === 'BOB' ? 'YES_BANK' : 'INDIAN_BANK',
-      severity: pipe.successRate < 30 ? 'high' : pipe.successRate < 60 ? 'medium' : 'low',
-      timestamp: new Date().toISOString()
-    }));
-
-    setAlerts(newAlerts);
-    if (newAlerts.length > 0) {
-      setShowAlert(true);
-    }
+    fetchAvailableFiles();
   }, []);
 
-  const filteredData = pipeAnalysisData.filter(pipe => {
-    const matchesSearch = pipe.merchantName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         pipe.pipeName.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesPipe = pipeFilter === 'all' || pipe.pipeName === pipeFilter;
-    const matchesStatus = statusFilter === 'all' || pipe.status === statusFilter;
-    return matchesSearch && matchesPipe && matchesStatus;
-  });
+  useEffect(() => {
+    loadCSVs();
+  }, [loadCSVs]);
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'healthy': return 'bg-green-100 text-green-800';
-      case 'warning': return 'bg-yellow-100 text-yellow-800';
-      case 'critical': return 'bg-red-100 text-red-800';
-      default: return 'bg-gray-100 text-gray-800';
-    }
-  };
+  const totalSuccess = summary.reduce((acc, s) => acc + s.success, 0);
+  const totalFailed = summary.reduce((acc, s) => acc + s.failed, 0);
+  const totalTransactions = totalSuccess + totalFailed;
+  const successRate = totalTransactions ? ((totalSuccess / totalTransactions) * 100).toFixed(2) : 0;
+  const failedRate = totalTransactions ? ((totalFailed / totalTransactions) * 100).toFixed(2) : 0;
 
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'healthy': return <CheckCircle className="w-5 h-5 text-green-600" />;
-      case 'warning': return <AlertTriangle className="w-5 h-5 text-yellow-600" />;
-      case 'critical': return <XCircle className="w-5 h-5 text-red-600" />;
-      default: return <Activity className="w-5 h-5 text-gray-600" />;
-    }
-  };
+  const filteredSummary = summary.filter((s) =>
+    (statusFilter === "All" || s.Status === statusFilter) &&
+    (clientFilter === "All" || s.client_name === clientFilter) &&
+    (pgModeFilter === "All" || s.pg_pay_mode === pgModeFilter) &&
+    (!searchCode || s.client_code?.toLowerCase().includes(searchCode.toLowerCase()))
+  );
 
-  const getPipeColor = (pipeName: string) => {
-    switch (pipeName) {
-      case 'BOB': return 'bg-blue-100 text-blue-800';
-      case 'AIRTEL': return 'bg-red-100 text-red-800';
-      case 'YES_BANK': return 'bg-green-100 text-green-800';
-      case 'INDIAN_BANK': return 'bg-purple-100 text-purple-800';
-      default: return 'bg-gray-100 text-gray-800';
-    }
-  };
-
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleString();
-  };
-
-  const healthyPipes = filteredData.filter(p => p.status === 'healthy').length;
-  const warningPipes = filteredData.filter(p => p.status === 'warning').length;
-  const criticalPipes = filteredData.filter(p => p.status === 'critical').length;
-  const avgSuccessRate = (filteredData.reduce((sum, pipe) => sum + pipe.successRate, 0) / filteredData.length).toFixed(1);
+  const uniqueStatuses = ["All", ...Array.from(new Set(summary.map((s) => s.Status)))];
+  const uniqueClients = ["All", ...Array.from(new Set(summary.map((s) => s.client_name)))];
+  const uniquePgModes = ["All", ...Array.from(new Set(summary.map((s) => s.pg_pay_mode)))];
 
   return (
-    <div className="space-y-6">
-      {/* Alert Popup */}
-      {showAlert && alerts.length > 0 && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center space-x-2">
-                <Bell className="w-6 h-6 text-red-600" />
-                <h3 className="text-lg font-semibold text-gray-900">PIPE Alert</h3>
-              </div>
-              <button
-                onClick={() => setShowAlert(false)}
-                className="text-gray-400 hover:text-gray-600 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            
-            <div className="space-y-3">
-              {alerts.slice(0, 3).map((alert) => (
-                <div key={alert.id} className="bg-red-50 border border-red-200 rounded-lg p-4">
-                  <div className="flex items-start space-x-3">
-                    <AlertTriangle className="w-5 h-5 text-red-600 mt-0.5" />
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-red-900">
-                        {alert.merchantName} - {alert.pipeName} PIPE
-                      </p>
-                      <p className="text-sm text-red-700 mt-1">
-                        Success Rate: {alert.successRate}% ({alert.totalTransactions} transactions)
-                      </p>
-                      <p className="text-sm text-red-600 mt-1">
-                        <strong>Action Required:</strong> Switch to {alert.recommendedPipe} pipe
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+    <div className="p-4">
+      <div className="flex items-center mb-4 gap-4">
+        <a href="https://www.sabpaisa.in" target="_blank">
+          <img src="https://services.sabpaisa.in/pages/images/Sab-Paisa-small.png" width={90} />
+        </a>
+        <h1 className="text-2xl font-bold">🔌 PIPE ANALYSIS</h1>
+      </div>
 
-            <div className="flex space-x-3 mt-6">
-              <button
-                onClick={() => setShowAlert(false)}
-                className="flex-1 bg-red-600 text-white py-2 px-4 rounded-lg hover:bg-red-700 transition-colors"
-              >
-                Take Action
-              </button>
-              <button
-                onClick={() => setShowAlert(false)}
-                className="flex-1 bg-gray-200 text-gray-800 py-2 px-4 rounded-lg hover:bg-gray-300 transition-colors"
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
+      {summary.length > 0 && (
+        <div className="mb-4 text-sm font-semibold">
+          📊 Total Txn: {totalTransactions} | ✅ Success: {totalSuccess} ({successRate}%) | ❌ Failed: {totalFailed} ({failedRate}%)
         </div>
       )}
 
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">PIPE Analysis</h1>
-        <div className="flex items-center space-x-3">
-          {alerts.length > 0 && (
-            <button
-              onClick={() => setShowAlert(true)}
-              className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors flex items-center space-x-2"
-            >
-              <Bell className="w-4 h-4" />
-              <span>{alerts.length} Alert{alerts.length > 1 ? 's' : ''}</span>
-            </button>
-          )}
-          <button className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2">
-            <RefreshCw className="w-4 h-4" />
-            <span>Refresh</span>
-          </button>
-        </div>
+      {loading && <p className="text-blue-500 font-semibold mb-4">Loading data, please wait...</p>}
+
+      <div className="flex flex-wrap gap-2 mb-4">
+        <button onClick={loadCSVs} className="btn btn-outline">🔁 Refresh</button>
+        <button onClick={() => setSummary(summary.filter((s) => s.Status === "Critical"))} className="btn btn-error">
+          🔔 Alert (Critical Only)
+        </button>
+        <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value as any)} className="select select-bordered">
+          <option value="default">Default</option>
+          <option value="asc">🔼 Lowest to Highest</option>
+          <option value="desc">🔽 Highest to Lowest</option>
+        </select>
+        <select value={selectedDates} onChange={(e) => setSelectedDates(e.target.value)} className="select select-bordered">
+          {fileDates.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="select select-bordered">
+          {uniqueStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+        </select>
+        <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} className="select select-bordered">
+          {uniqueClients.map((client) => <option key={client} value={client}>{client}</option>)}
+        </select>
+        <select value={pgModeFilter} onChange={(e) => setPgModeFilter(e.target.value)} className="select select-bordered">
+          {uniquePgModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+        </select>
+        <input
+          type="text"
+          placeholder="Search by Client Code"
+          value={searchCode}
+          onChange={(e) => setSearchCode(e.target.value)}
+          className="input input-bordered"
+        />
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-medium text-gray-600 mb-2">Healthy Pipes</h3>
-              <p className="text-2xl font-bold text-green-600">{healthyPipes}</p>
-            </div>
-            <CheckCircle className="w-8 h-8 text-green-600" />
-          </div>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-medium text-gray-600 mb-2">Warning Pipes</h3>
-              <p className="text-2xl font-bold text-yellow-600">{warningPipes}</p>
-            </div>
-            <AlertTriangle className="w-8 h-8 text-yellow-600" />
-          </div>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-medium text-gray-600 mb-2">Critical Pipes</h3>
-              <p className="text-2xl font-bold text-red-600">{criticalPipes}</p>
-            </div>
-            <XCircle className="w-8 h-8 text-red-600" />
-          </div>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-medium text-gray-600 mb-2">Avg Success Rate</h3>
-              <p className="text-2xl font-bold text-gray-900">{avgSuccessRate}%</p>
-            </div>
-            <TrendingUp className="w-8 h-8 text-blue-600" />
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-6 border-b border-gray-200">
-          <div className="flex items-center justify-between space-x-4">
-            <div className="relative flex-1">
-              <Search className="w-5 h-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search merchants or pipes..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full"
-              />
-            </div>
-            <div className="flex items-center space-x-3">
-              <select
-                value={pipeFilter}
-                onChange={(e) => setPipeFilter(e.target.value)}
-                className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="all">All Pipes</option>
-                <option value="BOB">BOB</option>
-                <option value="AIRTEL">AIRTEL</option>
-                <option value="YES_BANK">YES BANK</option>
-                <option value="INDIAN_BANK">INDIAN BANK</option>
-              </select>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="all">All Status</option>
-                <option value="healthy">Healthy</option>
-                <option value="warning">Warning</option>
-                <option value="critical">Critical</option>
-              </select>
-              <button className="p-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
-                <Filter className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50">
+      <div className="overflow-x-auto">
+        {filteredSummary.length > 0 ? (
+          <table className="table w-full">
+            <thead>
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Merchant
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Pipe
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Payment Mode
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Transactions
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Success Rate
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Last Updated
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Action
-                </th>
+                <th>Client</th>
+                <th>Code</th>
+                <th>PG Pay Mode</th>
+                <th>Payment Mode</th>
+                <th>Success</th>
+                <th>Failed</th>
+                <th>Total</th>
+                <th>Success %</th>
+                <th>Status</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {filteredData.map((pipe) => (
-                <tr key={pipe.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-medium text-gray-900">{pipe.merchantName}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${getPipeColor(pipe.pipeName)}`}>
-                      {pipe.pipeName}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm text-gray-900">{pipe.paymentMode.replace('_', ' ')}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm text-gray-900">
-                      <div>Total: {pipe.totalTransactions}</div>
-                      <div className="text-xs text-green-600">Success: {pipe.successTransactions}</div>
-                      <div className="text-xs text-red-600">Failed: {pipe.failedTransactions}</div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center space-x-2">
-                      <div className="w-16 bg-gray-200 rounded-full h-2">
-                        <div 
-                          className={`h-2 rounded-full transition-all duration-300 ${
-                            pipe.successRate >= 80 ? 'bg-green-600' : 
-                            pipe.successRate >= 60 ? 'bg-yellow-600' : 'bg-red-600'
-                          }`}
-                          style={{ width: `${pipe.successRate}%` }}
-                        ></div>
-                      </div>
-                      <span className="text-sm font-medium text-gray-900">{pipe.successRate}%</span>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center space-x-2">
-                      {getStatusIcon(pipe.status)}
-                      <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(pipe.status)}`}>
-                        {pipe.status}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {formatDate(pipe.lastUpdated)}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {pipe.status === 'critical' || pipe.status === 'warning' ? (
-                      <button className="bg-red-600 text-white px-3 py-1 rounded text-xs hover:bg-red-700 transition-colors">
-                        Change Pipe
-                      </button>
-                    ) : (
-                      <span className="text-xs text-gray-500">No action needed</span>
-                    )}
-                  </td>
+            <tbody>
+              {filteredSummary.map((s, i) => (
+                <tr key={i} className={s.Status === "Critical" ? "bg-red-100" : ""}>
+                  <td>{s.client_name}</td>
+                  <td>{s.client_code}</td>
+                  <td>{s.pg_pay_mode}</td>
+                  <td>{s.payment_mode}</td>
+                  <td>{s.success}</td>
+                  <td>{s.failed}</td>
+                  <td>{s.TotalTxn}</td>
+                  <td>{s.SuccessPercent}%</td>
+                  <td>{s.Status}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        ) : (
+          <div className="text-gray-500">📂 No data loaded yet. Select a date above.
+          </div>
+        )}
+      </div>
+
+      <div className="flex gap-4 mt-4">
+        <button onClick={downloadCSV} className="btn btn-success">📅 Download Summary</button>
+        <button onClick={handleUpload} className="btn btn-info">📄 Upload to Firestore</button>
       </div>
     </div>
   );

@@ -15,7 +15,7 @@ const SubscriptionManagement: React.FC = () => {
       status: 'active',
       startDate: '2024-01-15',
       endDate: '2025-01-15',
-      amount: 50000,
+      amount: 49999,
       billingCycle: 'annual'
     },
     {
@@ -26,7 +26,7 @@ const SubscriptionManagement: React.FC = () => {
       status: 'active',
       startDate: '2024-02-20',
       endDate: '2024-05-20',
-      amount: 15000,
+      amount: 14999,
       billingCycle: 'monthly'
     },
     {
@@ -37,7 +37,7 @@ const SubscriptionManagement: React.FC = () => {
       status: 'trial',
       startDate: '2024-03-10',
       endDate: '2024-03-24',
-      amount: 0,
+      amount: 9999,
       billingCycle: 'monthly'
     },
     {
@@ -48,7 +48,7 @@ const SubscriptionManagement: React.FC = () => {
       status: 'cancelled',
       startDate: '2024-01-05',
       endDate: '2024-03-05',
-      amount: 15000,
+      amount: 14999,
       billingCycle: 'monthly'
     },
     {
@@ -59,7 +59,7 @@ const SubscriptionManagement: React.FC = () => {
       status: 'expired',
       startDate: '2024-02-28',
       endDate: '2024-03-28',
-      amount: 5000,
+      amount: 9999,
       billingCycle: 'monthly'
     }
   ];

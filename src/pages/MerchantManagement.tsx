@@ -1,203 +1,236 @@
-import React, { useState } from 'react';
-import { Search, Filter, Plus, MoreHorizontal, Eye, Edit, Trash2 } from 'lucide-react';
-import { Merchant } from '../types';
+import React, { useEffect, useState } from "react";
+import * as XLSX from "xlsx";
 
-const MerchantManagement: React.FC = () => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+const SHEET_API_URL =
+  "https://sheets.googleapis.com/v4/spreadsheets/1eL5U5lpK_O3RJVCGkNS11C8n-uyRcDzqakPIXGq1MYU/values/Sheet1?key=AIzaSyC5VnCgDA6Tq_lHvKYCD-AHJQ4vq0eK7Jc";
 
-  const merchants: Merchant[] = [
-    {
-      id: '1',
-      name: 'TechCorp Solutions',
-      email: 'contact@techcorp.com',
-      phone: '+91 9876543210',
-      status: 'active',
-      gmv: 450000,
-      joinDate: '2024-01-15',
-      category: 'Technology',
-      location: 'Mumbai'
-    },
-    {
-      id: '2',
-      name: 'Fashion Hub',
-      email: 'hello@fashionhub.com',
-      phone: '+91 8765432109',
-      status: 'active',
-      gmv: 380000,
-      joinDate: '2024-02-20',
-      category: 'Fashion',
-      location: 'Delhi'
-    },
-    {
-      id: '3',
-      name: 'Food Express',
-      email: 'orders@foodexpress.com',
-      phone: '+91 7654321098',
-      status: 'pending',
-      gmv: 120000,
-      joinDate: '2024-03-10',
-      category: 'Food & Beverage',
-      location: 'Bangalore'
-    },
-    {
-      id: '4',
-      name: 'Digital Services',
-      email: 'info@digitalservices.com',
-      phone: '+91 6543210987',
-      status: 'suspended',
-      gmv: 250000,
-      joinDate: '2024-01-05',
-      category: 'Services',
-      location: 'Chennai'
-    },
-    {
-      id: '5',
-      name: 'Retail Store',
-      email: 'support@retailstore.com',
-      phone: '+91 5432109876',
-      status: 'inactive',
-      gmv: 90000,
-      joinDate: '2024-02-28',
-      category: 'Retail',
-      location: 'Hyderabad'
-    }
-  ];
+const ROWS_PER_PAGE = 80;
 
-  const filteredMerchants = merchants.filter(merchant => {
-    const matchesSearch = merchant.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         merchant.email.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || merchant.status === statusFilter;
-    return matchesSearch && matchesStatus;
+const MerchantManagement = () => {
+  const [data, setData] = useState<string[][]>([]);
+  const [filteredRows, setFilteredRows] = useState<string[][]>([]);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [merchantTypeFilter, setMerchantTypeFilter] = useState("");
+  const [page, setPage] = useState(1);
+  const [typeCount, setTypeCount] = useState(0);
+
+  const fetchData = () => {
+    fetch(SHEET_API_URL)
+      .then((res) => res.json())
+      .then((json) => {
+        const values = json.values;
+        setData(values);
+        setFilteredRows(values.slice(1));
+      })
+      .catch((err) => console.error("Sheet fetch error:", err));
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  if (!data || data.length === 0) return <p>Loading...</p>;
+
+  const headers = data[0];
+  const allRows = data.slice(1);
+
+  const statusIndex = headers.findIndex((h) =>
+    /NT|WIP|ACTIVE|TRANSACTING/i.test(h)
+  );
+  const websiteIndex = headers.findIndex((h) =>
+    h.toLowerCase().includes("website")
+  );
+  const merchantTypeIndex = headers.findIndex((h) =>
+    h.includes("EXISTING/NEW MERCHANT")
+  );
+
+  const total = allRows.length;
+  const counts = { NT: 0, WIP: 0, ACTIVE: 0, TRANSACTING: 0 };
+
+  allRows.forEach((row) => {
+    const val = row.join(" ").toUpperCase();
+    if (val.includes("NT")) counts.NT++;
+    if (val.includes("WIP")) counts.WIP++;
+    if (val.includes("ACTIVE")) counts.ACTIVE++;
+    if (val.includes("TRANSACTING")) counts.TRANSACTING++;
   });
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'active': return 'bg-green-100 text-green-800';
-      case 'inactive': return 'bg-gray-100 text-gray-800';
-      case 'pending': return 'bg-yellow-100 text-yellow-800';
-      case 'suspended': return 'bg-red-100 text-red-800';
-      default: return 'bg-gray-100 text-gray-800';
+  const handleFilter = (status = statusFilter, type = merchantTypeFilter) => {
+    const newFiltered = allRows.filter((row) => {
+      const rowText = row.join(" ").toUpperCase();
+      const matchesStatus = status ? rowText.includes(status.toUpperCase()) : true;
+      const matchesType =
+        type && merchantTypeIndex >= 0
+          ? (row[merchantTypeIndex] || "").toUpperCase() === type.toUpperCase()
+          : true;
+      return matchesStatus && matchesType;
+    });
+    setFilteredRows(newFiltered);
+    setPage(1);
+    if (merchantTypeIndex >= 0 && type) {
+      const count = allRows.filter(row => (row[merchantTypeIndex] || "").toUpperCase() === type.toUpperCase()).length;
+      setTypeCount(count);
+    } else {
+      setTypeCount(0);
     }
   };
 
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...filteredRows]);
+    XLSX.utils.book_append_sheet(wb, ws, "Merchants");
+    XLSX.writeFile(wb, "Merchant_Data.xlsx");
+  };
+
+  const pageCount = Math.ceil(filteredRows.length / ROWS_PER_PAGE);
+  const currentRows = filteredRows.slice(
+    (page - 1) * ROWS_PER_PAGE,
+    page * ROWS_PER_PAGE
+  );
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Merchant Management</h1>
-        <button className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2">
-          <Plus className="w-4 h-4" />
-          <span>Add Merchant</span>
+    <div className="p-4">
+      {/* Export & Refresh */}
+      <div className="mb-4 flex justify-between items-center flex-wrap gap-2">
+        <button
+          className="bg-green-600 text-white px-4 py-1 rounded hover:bg-green-700"
+          onClick={exportToExcel}
+        >
+          📥 Export to Excel
+        </button>
+        <button
+          className="bg-blue-600 text-white px-4 py-1 rounded hover:bg-blue-700"
+          onClick={fetchData}
+        >
+          🔄 Refresh
         </button>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-6 border-b border-gray-200">
-          <div className="flex items-center justify-between space-x-4">
-            <div className="relative flex-1">
-              <Search className="w-5 h-5 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search merchants..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full"
-              />
-            </div>
-            <div className="flex items-center space-x-3">
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="all">All Status</option>
-                <option value="active">Active</option>
-                <option value="inactive">Inactive</option>
-                <option value="pending">Pending</option>
-                <option value="suspended">Suspended</option>
-              </select>
-              <button className="p-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
-                <Filter className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
+      <h2 className="text-2xl font-bold text-blue-700 mb-4">📋 Merchant Management</h2>
+
+      {/* Summary Buttons */}
+      <div className="flex gap-4 mb-4 flex-wrap">
+        {["Total", "NT", "WIP", "ACTIVE", "TRANSACTING"].map((label) => (
+          <button
+            key={label}
+            className="bg-blue-100 border border-blue-400 px-4 py-2 rounded text-sm font-semibold"
+            onClick={() => {
+              setStatusFilter(label === "Total" ? "" : label);
+              handleFilter(label === "Total" ? "" : label, merchantTypeFilter);
+            }}
+          >
+            {label}: {label === "Total" ? total : counts[label as keyof typeof counts]}
+          </button>
+        ))}
+      </div>
+
+      {/* Filters */}
+      <div className="flex gap-4 mb-4 flex-wrap items-center">
+        <div>
+          <label className="mr-2 font-semibold">🔽 Status:</label>
+          <select
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value);
+              handleFilter(e.target.value, merchantTypeFilter);
+            }}
+            className="border px-2 py-1 rounded"
+          >
+            <option value="">All</option>
+            <option value="NT">NT</option>
+            <option value="WIP">WIP</option>
+            <option value="ACTIVE">ACTIVE</option>
+            <option value="TRANSACTING">TRANSACTING</option>
+          </select>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Merchant
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  GMV
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Category
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Location
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Join Date
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {filteredMerchants.map((merchant) => (
-                <tr key={merchant.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">{merchant.name}</div>
-                      <div className="text-sm text-gray-500">{merchant.email}</div>
-                      <div className="text-sm text-gray-500">{merchant.phone}</div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(merchant.status)}`}>
-                      {merchant.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    ₹{merchant.gmv.toLocaleString()}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {merchant.category}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {merchant.location}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {new Date(merchant.joinDate).toLocaleDateString()}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    <div className="flex items-center space-x-2">
-                      <button className="p-1 text-blue-600 hover:text-blue-800 transition-colors">
-                        <Eye className="w-4 h-4" />
-                      </button>
-                      <button className="p-1 text-green-600 hover:text-green-800 transition-colors">
-                        <Edit className="w-4 h-4" />
-                      </button>
-                      <button className="p-1 text-red-600 hover:text-red-800 transition-colors">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                      <button className="p-1 text-gray-600 hover:text-gray-800 transition-colors">
-                        <MoreHorizontal className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div>
+          <label className="mr-2 font-semibold">🔽 Merchant Type:</label>
+          <select
+            value={merchantTypeFilter}
+            onChange={(e) => {
+              setMerchantTypeFilter(e.target.value);
+              handleFilter(statusFilter, e.target.value);
+            }}
+            className="border px-2 py-1 rounded"
+          >
+            <option value="">All</option>
+            <option value="NEW">NEW</option>
+            <option value="EXISTING">EXISTING</option>
+            <option value="SELF-SOURCING">SELF-SOURCING</option>
+          </select>
+          {merchantTypeFilter && (
+            <span className="ml-4 font-semibold text-sm text-gray-600">
+              Showing {typeCount} {merchantTypeFilter.toLowerCase()} merchants
+            </span>
+          )}
         </div>
+      </div>
+
+      {/* Table */}
+      <div className="overflow-auto border border-gray-300 rounded">
+        <table className="min-w-full text-sm border-collapse">
+          <thead className="bg-gray-100">
+            <tr>
+              {headers.map((h, i) => (
+                <th
+                  key={i}
+                  className={`border px-2 py-1 font-semibold text-left ${
+                    i < 2 ? "sticky left-0 z-10 bg-gray-100" : ""
+                  }`}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {currentRows.map((row, i) => (
+              <tr key={i}>
+                {headers.map((_, j) => {
+                  const cell = row[j] || "";
+                  const isWebsite = j === websiteIndex && cell.startsWith("http");
+                  return (
+                    <td
+                      key={j}
+                      className={`border px-2 py-1 ${
+                        j < 2 ? "sticky left-0 bg-white z-0" : ""
+                      }`}
+                    >
+                      {isWebsite ? (
+                        <a
+                          href={cell}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 underline"
+                        >
+                          {cell}
+                        </a>
+                      ) : (
+                        cell
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      <div className="mt-4 flex justify-center gap-2 flex-wrap">
+        {Array.from({ length: pageCount }, (_, i) => (
+          <button
+            key={i}
+            onClick={() => setPage(i + 1)}
+            className={`px-3 py-1 border rounded ${
+              page === i + 1 ? "bg-blue-500 text-white" : "bg-white"
+            }`}
+          >
+            {i + 1}
+          </button>
+        ))}
       </div>
     </div>
   );
